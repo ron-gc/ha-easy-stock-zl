@@ -3,10 +3,11 @@ import logging
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, CONF_SYMBOL, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
-from .coordinator import StockDataCoordinator
+from .const import CONF_SYMBOL, DATA_COORDINATOR, DOMAIN
+from .coordinator import ZwitserlevenDataCoordinator, get_coordinator
 from .frontend import (
     CARD_URL_BASE,
     DATA_FRONTEND,
@@ -18,12 +19,14 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor"]
 
+type ZwitserlevenConfigEntry = ConfigEntry[ZwitserlevenDataCoordinator]
 
-class EasyStockHistoryView(HomeAssistantView):
-    """REST endpoint: GET /api/easy_stock/history?symbol=AAPL"""
 
-    url = "/api/easy_stock/history"
-    name = "api:easy_stock:history"
+class ZwitserlevenHistoryView(HomeAssistantView):
+    """REST endpoint: GET /api/zwitserleven_fondsen/history?symbol=LTAAF"""
+
+    url = "/api/zwitserleven_fondsen/history"
+    name = "api:zwitserleven_fondsen:history"
     requires_auth = True
 
     async def get(self, request):
@@ -32,9 +35,10 @@ class EasyStockHistoryView(HomeAssistantView):
         if not symbol:
             return self.json_message("symbol parameter required", status_code=400)
 
-        for coordinator in hass.data.get(DOMAIN, {}).values():
-            if hasattr(coordinator, "symbol") and coordinator.symbol == symbol:
-                return self.json({"symbol": symbol, "history": coordinator._history or []})
+        coordinator = hass.data.get(DATA_COORDINATOR)
+        history = coordinator.history(symbol) if coordinator else None
+        if history is not None:
+            return self.json({"symbol": symbol, "history": history})
 
         return self.json_message(f"No sensor for symbol {symbol}", status_code=404)
 
@@ -47,14 +51,14 @@ async def _async_register_card_safely(hass: HomeAssistant) -> None:
     enters hass.config.components and *every* config entry fails, so a
     frontend detail would cost the user all of their sensors. Card
     registration reads and validates the Lovelace resource store, writes to
-    it, and hashes a file that a truncated HACS download can leave missing --
+    it, and hashes a file that a truncated download can leave missing --
     plenty of ways to raise for something the sensors do not depend on.
     """
     try:
         await async_register_card(hass)
     except Exception:  # noqa: BLE001 - deliberately broad, see docstring
         _LOGGER.exception(
-            "Easy Stock could not register its Lovelace card. Your sensors are "
+            "Zwitserleven Fondsen could not register its Lovelace card. Your sensors are "
             "unaffected and keep updating normally; only the custom card may "
             "be missing from dashboards. As a workaround, add %s as a "
             "dashboard resource of type 'module' under Settings > Dashboards > "
@@ -63,17 +67,18 @@ async def _async_register_card_safely(hass: HomeAssistant) -> None:
         )
 
 
+def _history_store(hass: HomeAssistant, symbol: str) -> Store:
+    return Store(hass, version=1, key=f"zwitserleven_fondsen.{symbol.lower()}.history")
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Register the card, the shared data store and the history endpoint."""
+    """Register the card and the history endpoint."""
     await _async_register_card_safely(hass)
-    hass.data.setdefault(DOMAIN, {})
-    hass.http.register_view(EasyStockHistoryView())
+    hass.http.register_view(ZwitserlevenHistoryView())
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    hass.data.setdefault(DOMAIN, {})
-
+async def async_setup_entry(hass: HomeAssistant, entry: ZwitserlevenConfigEntry) -> bool:
     # Removing the last config entry unregisters the card but does not unload
     # the component: ConfigEntries._async_remove never touches
     # hass.config.components, so adding an entry back afterwards takes
@@ -87,29 +92,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _async_register_card_safely(hass)
 
     symbol = entry.data[CONF_SYMBOL]
-    scan_interval = entry.options.get(
-        CONF_SCAN_INTERVAL, entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-    )
-    store = Store(hass, version=1, key=f"easy_stock.{symbol.lower()}.history")
-    coordinator = StockDataCoordinator(
-        hass,
-        symbol=symbol,
-        update_interval=scan_interval,
-        store=store,
-    )
-    await coordinator.async_config_entry_first_refresh()
-    hass.data[DOMAIN][entry.entry_id] = coordinator
+    coordinator = get_coordinator(hass)
+    await coordinator.async_add_fund(symbol, _history_store(hass, symbol))
+    # Refreshes for every fund; the page cache keeps the entries that set up
+    # together at startup down to one download.
+    await coordinator.async_refresh()
+    if not coordinator.last_update_success or symbol not in coordinator.data:
+        coordinator.remove_fund(symbol)
+        raise ConfigEntryNotReady(
+            f"Fund {symbol} is not available on the Zwitserleven page"
+        ) from coordinator.last_exception
+    entry.runtime_data = coordinator
+    entry.async_on_unload(lambda: coordinator.remove_fund(symbol))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
-    return unload_ok
+async def async_unload_entry(hass: HomeAssistant, entry: ZwitserlevenConfigEntry) -> bool:
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -117,7 +119,9 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Drop the card registration once the last entry is gone."""
+    """Delete the fund's stored prices; drop the card once the last entry is gone."""
+    if CONF_SYMBOL in entry.data:
+        await _history_store(hass, entry.data[CONF_SYMBOL]).async_remove()
     if hass.config_entries.async_entries(DOMAIN):
         return
     await async_unregister_card(hass)

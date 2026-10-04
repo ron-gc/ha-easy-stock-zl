@@ -1,8 +1,10 @@
-"""Shared fixtures for easy_stock tests."""
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+"""Shared fixtures for zwitserleven_fondsen tests."""
+from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
+
+from custom_components.zwitserleven_fondsen.fondsen_page import FundQuote
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 
@@ -13,77 +15,12 @@ def auto_enable_custom_integrations(enable_custom_integrations):
     return
 
 
-SYMBOL = "AAPL"
+# A saved copy of the real fund overview page (prices dated 02-10-2026).
+FONDSEN_HTML = (Path(__file__).parent / "fixtures" / "fondsen.html").read_text(
+    encoding="utf-8"
+)
 
-# Five consecutive trading days, safely in the past
-SAMPLE_DAYS = [
-    ("2024-01-02", 185.20),
-    ("2024-01-03", 184.10),
-    ("2024-01-04", 186.50),
-    ("2024-01-05", 188.00),
-    ("2024-01-08", 189.30),
-]
-
-
-_DEFAULT_PERIOD = object()
-
-
-def make_trading_period(open_now=True, now=None):
-    """Build a currentTradingPeriod whose regular window is open or closed now."""
-    if now is None:
-        now = int(datetime.now(timezone.utc).timestamp())
-    start, end = (now - 3600, now + 3600) if open_now else (now - 7200, now - 3600)
-    return {
-        "pre": {"start": start - 3600, "end": start},
-        "regular": {"start": start, "end": end},
-        "post": {"start": end, "end": end + 3600},
-    }
-
-
-def make_yahoo_payload(days_prices=None, meta_price=None, trading_period=_DEFAULT_PERIOD,
-                       market_time=None):
-    """Build a minimal Yahoo Finance chart API response.
-
-    Mirrors the live v8 chart API: it carries currentTradingPeriod and no
-    marketState — Yahoo dropped that field (issue #13). Pass trading_period=None
-    to model a response without any trading windows at all.
-    """
-    if days_prices is None:
-        days_prices = SAMPLE_DAYS
-    if trading_period is _DEFAULT_PERIOD:
-        trading_period = make_trading_period(open_now=True)
-    timestamps = []
-    closes = []
-    for date_str, price in days_prices:
-        dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        timestamps.append(int(dt.timestamp()))
-        closes.append(price)
-    last_close = closes[-1]
-    prev_close = closes[-2] if len(closes) >= 2 else last_close
-    meta = {
-        "symbol": SYMBOL,
-        "currency": "USD",
-        "longName": "Apple Inc.",
-        "regularMarketPrice": meta_price if meta_price is not None else last_close,
-        "previousClose": prev_close,
-        "chartPreviousClose": prev_close,
-    }
-    if market_time is not None:
-        meta["regularMarketTime"] = market_time
-    if trading_period is not None:
-        meta["currentTradingPeriod"] = trading_period
-    return {
-        "chart": {
-            "result": [
-                {
-                    "meta": meta,
-                    "timestamp": timestamps,
-                    "indicators": {"quote": [{"close": closes}]},
-                }
-            ],
-            "error": None,
-        }
-    }
+SYMBOL = "LTAAF"
 
 
 def make_store(history=None):
@@ -93,17 +30,15 @@ def make_store(history=None):
     return store
 
 
-def mock_http(payload, status=200):
-    """Return a context manager that patches aiohttp.ClientSession."""
-    mock_resp = AsyncMock()
-    mock_resp.status = status
-    mock_resp.json = AsyncMock(return_value=payload)
-    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
-    mock_resp.__aexit__ = AsyncMock(return_value=False)
+def make_page(*quotes, error=None):
+    """Return a mocked FondsenPage serving `quotes`, or raising `error`."""
+    page = AsyncMock()
+    if error is not None:
+        page.async_get_funds.side_effect = error
+    else:
+        page.async_get_funds.return_value = {q.symbol: q for q in quotes}
+    return page
 
-    mock_session = MagicMock()
-    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-    mock_session.__aexit__ = AsyncMock(return_value=False)
-    mock_session.get.return_value = mock_resp
 
-    return patch("aiohttp.ClientSession", MagicMock(return_value=mock_session)), mock_session
+def quote(date="2026-10-02", price=225.87, symbol=SYMBOL, name="ASN Duurzaam Aandelenfonds"):
+    return FundQuote(symbol=symbol, name=name, price_date=date, price=price)

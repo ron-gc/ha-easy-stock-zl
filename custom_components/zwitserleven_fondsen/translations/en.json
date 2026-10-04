@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add fund",
+        "description": "Choose the Zwitserleven fund to track.",
+        "data": {
+          "symbol": "Fund",
+          "name": "Display name (optional)"
+        },
+        "data_description": {
+          "symbol": "Funds you have already added are not listed.",
+          "name": "Name for the fund's device and sensor. Leave empty to use the fund name from Zwitserleven."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This fund is already configured.",
+      "cannot_connect": "Could not load the fund list from the Zwitserleven website. Try again later.",
+      "no_funds_left": "Every Zwitserleven fund is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Fund options",
+        "data": {
+          "name": "Display name (optional)"
+        },
+        "data_description": {
+          "name": "Name for the fund's device and sensor. Leave empty to use the fund name from Zwitserleven."
+        }
+      }
+    }
+  }
+}

@@ -1,541 +1,257 @@
-"""Unit tests for StockDataCoordinator."""
-from datetime import datetime, timezone, timedelta
-from unittest.mock import patch
+"""Unit tests for the shared ZwitserlevenDataCoordinator."""
+import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-from custom_components.easy_stock.coordinator import StockDataCoordinator
-from custom_components.easy_stock.const import YAHOO_CHART_URL, YAHOO_CHART_URL_MINI
-
-from .conftest import (
-    SYMBOL,
-    SAMPLE_DAYS,
-    make_trading_period,
-    make_yahoo_payload,
-    make_store,
-    mock_http,
+from custom_components.zwitserleven_fondsen.coordinator import (
+    ZwitserlevenDataCoordinator,
+    get_coordinator,
 )
+from custom_components.zwitserleven_fondsen.fondsen_page import FondsenPageError
+
+from .conftest import SYMBOL, make_page, make_store, quote
+
+
+async def _coord(hass, page, history=None, symbol=SYMBOL):
+    coord = ZwitserlevenDataCoordinator(hass, page)
+    store = make_store(history)
+    await coord.async_add_fund(symbol, store)
+    return coord, store
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Result
 # ---------------------------------------------------------------------------
 
 
-def _coord(hass, history=None):
-    return StockDataCoordinator(hass, SYMBOL, 900, make_store(history))
+async def test_returns_the_fund_quote(hass):
+    coord, _ = await _coord(hass, make_page(quote()))
+
+    data = await coord._async_update_data()
+
+    assert data[SYMBOL] == {
+        "symbol": SYMBOL,
+        "long_name": "ASN Duurzaam Aandelenfonds",
+        "price_date": "2026-10-02",
+        "current_price": 225.87,
+        "previous_close": 225.87,
+        "change": 0,
+        "change_pct": 0,
+    }
 
 
-# ---------------------------------------------------------------------------
-# URL selection
-# ---------------------------------------------------------------------------
+async def test_change_against_the_previous_day(hass):
+    coord, _ = await _coord(hass, make_page(quote(price=225.87)), [["2026-10-01", 220.0]])
+
+    result = (await coord._async_update_data())[SYMBOL]
+
+    assert result["previous_close"] == 220.0
+    assert result["change"] == 5.87
+    assert result["change_pct"] == round(5.87 / 220 * 100, 2)
 
 
-async def test_first_call_uses_backfill_url(hass):
-    """Empty history → full 1y URL."""
-    coord = _coord(hass, history=None)
-    patcher, mock_session = mock_http(make_yahoo_payload())
+async def test_change_survives_repeated_polls_on_the_same_day(hass):
+    """The second poll of a day must still compare against the day before.
 
-    with patcher:
-        await coord._async_update_data()
-
-    called_url = mock_session.get.call_args[0][0]
-    assert called_url == YAHOO_CHART_URL.format(symbol=SYMBOL)
-
-
-async def test_subsequent_call_uses_mini_url(hass):
-    """Existing history with < 250 entries → mini 5d URL."""
-    history = [[d, p] for d, p in SAMPLE_DAYS]
-    coord = _coord(hass, history=history)
-    patcher, mock_session = mock_http(make_yahoo_payload())
-
-    with patcher:
-        await coord._async_update_data()
-
-    called_url = mock_session.get.call_args[0][0]
-    assert called_url == YAHOO_CHART_URL_MINI.format(symbol=SYMBOL)
-
-
-async def test_migration_triggers_backfill(hass):
-    """≥250 entries but oldest is < 355 days ago → backfill to fix truncated crypto history."""
-    today = datetime.now(timezone.utc)
-    # Build 250 entries starting 300 days ago (too recent — crypto migration case)
-    history = [
-        [(today - timedelta(days=300 - i)).strftime("%Y-%m-%d"), 100.0 + i]
-        for i in range(250)
-    ]
-    coord = _coord(hass, history=history)
-    patcher, mock_session = mock_http(make_yahoo_payload())
-
-    with patcher:
-        await coord._async_update_data()
-
-    called_url = mock_session.get.call_args[0][0]
-    assert called_url == YAHOO_CHART_URL.format(symbol=SYMBOL)
-
-
-# ---------------------------------------------------------------------------
-# Response parsing
-# ---------------------------------------------------------------------------
-
-
-async def test_parses_response_fields(hass):
-    """Parsed result dict contains all expected keys with correct values."""
-    coord = _coord(hass)
-    payload = make_yahoo_payload()
-    patcher, _ = mock_http(payload)
-
-    with patcher:
-        result = await coord._async_update_data()
-
-    assert result["symbol"] == SYMBOL
-    assert result["currency"] == "USD"
-    assert result["long_name"] == "Apple Inc."
-    assert result["market_state"] == "REGULAR"
-    assert isinstance(result["current_price"], float)
-    assert isinstance(result["change"], float)
-    assert isinstance(result["change_pct"], float)
-    assert "price_is_live" in result
-    assert "history" not in result  # history is served via REST endpoint, not sensor state
-
-
-async def test_backfill_populates_history(hass):
-    """First fetch stores history (capped at 365 entries)."""
-    store = make_store(history=None)
-    coord = StockDataCoordinator(hass, SYMBOL, 900, store)
-    patcher, _ = mock_http(make_yahoo_payload())
-
-    with patcher:
-        await coord._async_update_data()
-
-    assert coord._history is not None
-    assert len(coord._history) <= 365
-    store.async_save.assert_called_once()
-
-
-async def test_new_day_appended_to_history(hass):
-    """Mini fetch appends a new trading day that isn't in history yet."""
-    history = [[d, p] for d, p in SAMPLE_DAYS[:-1]]  # missing last day
-    store = make_store(history=history)
-    coord = StockDataCoordinator(hass, SYMBOL, 900, store)
-
-    # Mini fetch returns only the last two days
-    payload = make_yahoo_payload(days_prices=SAMPLE_DAYS[-2:])
-    patcher, _ = mock_http(payload)
-
-    with patcher:
-        await coord._async_update_data()
-
-    assert coord._history[-1][0] == SAMPLE_DAYS[-1][0]
-    store.async_save.assert_called_once()
-
-
-async def test_todays_history_entry_is_refreshed_while_the_session_runs(hass):
-    """Yahoo rewrites today's candle as the session runs — the stored point must follow.
-
-    Appending only on a new date froze today's entry at the first intraday sample
-    seen, so every stored "daily close" was whatever the price happened to be at
-    the first poll of that day.
+    The last history entry is today's own price by then; using it as the
+    previous close dropped the change to 0 after the first poll.
     """
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    history = [[d, p] for d, p in SAMPLE_DAYS] + [[today_str, 190.00]]
-    store = make_store(history=history)
-    coord = StockDataCoordinator(hass, SYMBOL, 900, store)
+    coord, _ = await _coord(hass, make_page(quote(price=225.87)), [["2026-10-01", 220.0]])
 
-    payload = make_yahoo_payload(days_prices=SAMPLE_DAYS[-1:] + [(today_str, 195.00)])
-    patcher, _ = mock_http(payload)
+    await coord._async_update_data()
+    result = (await coord._async_update_data())[SYMBOL]
 
-    with patcher:
-        await coord._async_update_data()
-
-    assert coord._history[-1] == [today_str, 195.00]
-    assert len(coord._history) == len(SAMPLE_DAYS) + 1  # refreshed, not appended
-    store.async_save.assert_called_once()
+    assert result["previous_close"] == 220.0
+    assert result["change"] == 5.87
 
 
-async def test_no_duplicate_appended_when_date_unchanged(hass):
-    """Mini fetch with no new date leaves history unchanged."""
-    history = [[d, p] for d, p in SAMPLE_DAYS]
-    store = make_store(history=history)
-    coord = StockDataCoordinator(hass, SYMBOL, 900, store)
+async def test_prices_are_rounded_to_four_decimals(hass):
+    coord, _ = await _coord(hass, make_page(quote(price=7.137149)), [["2026-10-01", 7.0]])
 
-    # All fetched dates already in history
-    patcher, _ = mock_http(make_yahoo_payload())
+    result = (await coord._async_update_data())[SYMBOL]
 
-    with patcher:
-        await coord._async_update_data()
+    assert result["current_price"] == 7.1371
+    assert result["change"] == 0.1371
 
-    assert len(coord._history) == len(SAMPLE_DAYS)
+
+# ---------------------------------------------------------------------------
+# One download for every fund
+# ---------------------------------------------------------------------------
+
+
+async def test_one_download_updates_every_fund(hass):
+    page = make_page(quote(), quote(symbol="LTAOB", name="Obligaties", price=24.56))
+    coord, _ = await _coord(hass, page)
+    await coord.async_add_fund("LTAOB", make_store())
+
+    data = await coord._async_update_data()
+
+    assert set(data) == {SYMBOL, "LTAOB"}
+    assert page.async_get_funds.call_count == 1
+
+
+async def test_every_entry_shares_one_coordinator(hass):
+    assert get_coordinator(hass) is get_coordinator(hass)
+
+
+# ---------------------------------------------------------------------------
+# Schedule: at startup (entry setup) and every day at 20:00 UTC
+# ---------------------------------------------------------------------------
+
+EVENING = datetime(2026, 10, 4, 20, 0, 0, tzinfo=UTC)
+
+
+async def _fire(hass, freezer, when):
+    freezer.move_to(when)
+    async_fire_time_changed(hass, when)
+    await hass.async_block_till_done()
+
+
+async def test_does_not_poll_on_an_interval(hass):
+    coord, _ = await _coord(hass, make_page(quote()))
+    assert coord.update_interval is None
+
+
+async def test_refreshes_every_day_at_20_utc(hass, freezer):
+    freezer.move_to(EVENING - timedelta(hours=2))
+    page = make_page(quote())
+    await _coord(hass, page)
+
+    await _fire(hass, freezer, EVENING - timedelta(hours=1))
+    assert page.async_get_funds.call_count == 0
+
+    await _fire(hass, freezer, EVENING)
+    assert page.async_get_funds.call_count == 1
+
+    await _fire(hass, freezer, EVENING + timedelta(days=1))
+    assert page.async_get_funds.call_count == 2
+
+
+async def test_failed_daily_refresh_is_retried_hourly_until_it_succeeds(hass, freezer):
+    freezer.move_to(EVENING - timedelta(minutes=1))
+    page = make_page(error=FondsenPageError("Zwitserleven returned HTTP 503"))
+    await _coord(hass, page)
+
+    await _fire(hass, freezer, EVENING)
+    await _fire(hass, freezer, EVENING + timedelta(hours=1))
+    assert page.async_get_funds.call_count == 2
+
+    page.async_get_funds.side_effect = None
+    page.async_get_funds.return_value = {SYMBOL: quote()}
+    await _fire(hass, freezer, EVENING + timedelta(hours=2))
+    assert page.async_get_funds.call_count == 3
+
+    # Back to the daily schedule: no more hourly retries.
+    await _fire(hass, freezer, EVENING + timedelta(hours=3))
+    assert page.async_get_funds.call_count == 3
+
+
+async def test_schedule_stops_with_the_last_fund(hass, freezer):
+    freezer.move_to(EVENING - timedelta(minutes=1))
+    page = make_page(quote())
+    coord, _ = await _coord(hass, page)
+
+    coord.remove_fund(SYMBOL)
+    await _fire(hass, freezer, EVENING)
+
+    assert page.async_get_funds.call_count == 0
+
+
+async def test_removed_fund_is_no_longer_updated(hass):
+    coord, store = await _coord(hass, make_page(quote()))
+    coord.remove_fund(SYMBOL)
+
+    data = await coord._async_update_data()
+
+    assert data == {}
+    assert coord.history(SYMBOL) is None
     store.async_save.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# Price logic
+# History
 # ---------------------------------------------------------------------------
 
 
-async def test_price_is_live_when_last_date_is_today(hass):
-    """When the latest candle date == today, meta_price is used and price_is_live=True."""
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    days = SAMPLE_DAYS[:-1] + [(today_str, 195.00)]
-    meta = 196.50
+async def test_first_fetch_starts_the_history(hass):
+    coord, store = await _coord(hass, make_page(quote()))
 
-    coord = _coord(hass)
-    patcher, _ = mock_http(make_yahoo_payload(days_prices=days, meta_price=meta))
+    await coord._async_update_data()
 
-    with patcher:
-        result = await coord._async_update_data()
-
-    assert result["current_price"] == meta
-    assert result["price_is_live"] is True
+    assert coord.history(SYMBOL) == [["2026-10-02", 225.87]]
+    store.async_save.assert_called_once_with([["2026-10-02", 225.87]])
 
 
-async def test_price_is_live_when_meta_differs_from_last_close(hass):
-    """No trading windows → fall back to the heuristic: meta_price moved → live."""
-    coord = _coord(hass)
-    last_close = SAMPLE_DAYS[-1][1]
-    meta = round(last_close * 1.005, 4)  # 0.5% above close
+async def test_new_day_is_appended(hass):
+    coord, store = await _coord(hass, make_page(quote()), [["2026-10-01", 220.0]])
 
-    patcher, _ = mock_http(make_yahoo_payload(meta_price=meta, trading_period=None))
+    await coord._async_update_data()
 
-    with patcher:
-        result = await coord._async_update_data()
-
-    assert result["current_price"] == meta
-    assert result["price_is_live"] is True
+    assert coord.history(SYMBOL) == [["2026-10-01", 220.0], ["2026-10-02", 225.87]]
+    store.async_save.assert_called_once()
 
 
-async def test_price_is_stale_when_meta_matches_last_close(hass):
-    """No trading windows, old candle and meta_price == last close → stale."""
-    coord = _coord(hass)
-    last_close = SAMPLE_DAYS[-1][1]
+async def test_same_day_correction_replaces_the_price(hass):
+    coord, store = await _coord(hass, make_page(quote(price=226.0)), [["2026-10-02", 225.87]])
 
-    patcher, _ = mock_http(make_yahoo_payload(meta_price=last_close, trading_period=None))
+    await coord._async_update_data()
 
-    with patcher:
-        result = await coord._async_update_data()
+    assert coord.history(SYMBOL) == [["2026-10-02", 226.0]]
+    store.async_save.assert_called_once()
 
-    assert result["current_price"] == last_close
-    assert result["price_is_live"] is False
+
+async def test_unchanged_price_is_not_saved_again(hass):
+    coord, store = await _coord(hass, make_page(quote()), [["2026-10-02", 225.87]])
+
+    await coord._async_update_data()
+
+    store.async_save.assert_not_called()
+
+
+async def test_older_date_is_not_recorded(hass):
+    coord, store = await _coord(hass, make_page(quote(date="2026-10-01")), [["2026-10-02", 225.87]])
+
+    await coord._async_update_data()
+
+    assert coord.history(SYMBOL) == [["2026-10-02", 225.87]]
+    store.async_save.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# Market state (issue #13 — Yahoo dropped meta.marketState)
+# Errors
 # ---------------------------------------------------------------------------
 
 
-async def test_market_state_derived_when_yahoo_omits_it(hass):
-    """Open regular window and no marketState field → REGULAR, not the CLOSED default."""
-    coord = _coord(hass)
-    patcher, _ = mock_http(make_yahoo_payload())
-
-    with patcher:
-        result = await coord._async_update_data()
-
-    assert result["market_state"] == "REGULAR"
-
-
-async def test_market_state_closed_after_the_session_ended(hass):
-    """Session over but still the same UTC day (Tokyo case) → CLOSED, price not live."""
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    days = SAMPLE_DAYS[:-1] + [(today_str, 195.00)]
-    coord = _coord(hass)
-    patcher, _ = mock_http(
-        make_yahoo_payload(days_prices=days, trading_period=make_trading_period(open_now=False))
+async def test_page_error_raises_update_failed(hass):
+    coord, _ = await _coord(
+        hass, make_page(error=FondsenPageError("Zwitserleven returned HTTP 429"))
     )
 
-    with patcher:
-        result = await coord._async_update_data()
-
-    assert result["market_state"] == "CLOSED"
-    assert result["price_is_live"] is False
-
-
-async def test_traded_today_stays_true_after_the_session_ended(hass):
-    """The card needs "did it trade today" — that stays true once the market shuts."""
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    days = SAMPLE_DAYS[:-1] + [(today_str, 195.00)]
-    coord = _coord(hass)
-    patcher, _ = mock_http(
-        make_yahoo_payload(days_prices=days, trading_period=make_trading_period(open_now=False))
-    )
-
-    with patcher:
-        result = await coord._async_update_data()
-
-    assert result["traded_today"] is True
-
-
-async def test_traded_today_false_when_the_last_candle_is_old(hass):
-    coord = _coord(hass)
-    last_close = SAMPLE_DAYS[-1][1]
-    patcher, _ = mock_http(make_yahoo_payload(meta_price=last_close, trading_period=None))
-
-    with patcher:
-        result = await coord._async_update_data()
-
-    assert result["traded_today"] is False
-
-
-async def test_market_state_falls_back_to_closed_without_trading_windows(hass):
-    """Undeterminable session → keep the documented CLOSED default for the attribute."""
-    coord = _coord(hass)
-    patcher, _ = mock_http(make_yahoo_payload(trading_period=None))
-
-    with patcher:
-        result = await coord._async_update_data()
-
-    assert result["market_state"] == "CLOSED"
-
-
-async def test_change_and_change_pct_calculation(hass):
-    """change = current - prev_close; change_pct = change / prev_close * 100."""
-    coord = _coord(hass)
-    last_close = SAMPLE_DAYS[-1][1]  # 189.30
-    prev_close = SAMPLE_DAYS[-2][1]  # 188.00
-
-    patcher, _ = mock_http(make_yahoo_payload(meta_price=last_close))
-
-    with patcher:
-        result = await coord._async_update_data()
-
-    expected_change = round(last_close - prev_close, 4)
-    expected_pct = round((last_close - prev_close) / prev_close * 100, 2)
-    assert result["change"] == pytest.approx(expected_change, abs=0.001)
-    assert result["change_pct"] == pytest.approx(expected_pct, abs=0.01)
-
-
-# ---------------------------------------------------------------------------
-# Error handling
-# ---------------------------------------------------------------------------
-
-
-async def test_http_error_raises_update_failed(hass):
-    """Non-200 HTTP status raises UpdateFailed."""
-    coord = _coord(hass)
-    patcher, _ = mock_http({}, status=429)
-
-    with patcher, pytest.raises(UpdateFailed, match="HTTP 429"):
+    with pytest.raises(UpdateFailed, match="HTTP 429"):
         await coord._async_update_data()
 
 
-async def test_network_error_raises_update_failed(hass):
-    """aiohttp.ClientError raises UpdateFailed."""
-    import aiohttp
+async def test_missing_fund_is_left_out_and_logged_once(hass, caplog):
+    coord, _ = await _coord(hass, make_page(quote(symbol="LTAOB")))
 
-    coord = _coord(hass)
+    with caplog.at_level(logging.WARNING):
+        assert await coord._async_update_data() == {}
+        assert await coord._async_update_data() == {}
 
-    with patch("aiohttp.ClientSession", side_effect=aiohttp.ClientError("timeout")):
-        with pytest.raises(UpdateFailed, match="Network error"):
-            await coord._async_update_data()
-
-
-async def test_malformed_response_raises_update_failed(hass):
-    """Missing 'result' key in Yahoo response raises UpdateFailed."""
-    coord = _coord(hass)
-    bad_payload = {"chart": {"result": None, "error": "Not found"}}
-    patcher, _ = mock_http(bad_payload)
-
-    with patcher, pytest.raises(UpdateFailed, match="Error parsing"):
-        await coord._async_update_data()
+    assert caplog.text.count(f"Fund {SYMBOL} is no longer listed") == 1
 
 
-async def test_missing_timestamps_raises_update_failed(hass):
-    """Response without timestamps/indicators raises UpdateFailed."""
-    coord = _coord(hass)
-    bad_payload = {"chart": {"result": [{"meta": {}}], "error": None}}
-    patcher, _ = mock_http(bad_payload)
+async def test_returning_fund_is_logged(hass, caplog):
+    page = make_page(quote(symbol="LTAOB"))
+    coord, _ = await _coord(hass, page)
+    await coord._async_update_data()
 
-    with patcher, pytest.raises(UpdateFailed):
-        await coord._async_update_data()
-
-
-# ---------------------------------------------------------------------------
-# Price precision (issue #17)
-# ---------------------------------------------------------------------------
-
-
-async def test_a_sub_cent_price_is_not_rounded_to_zero(hass):
-    """round(4.35e-06, 4) reported SHIB-EUR as a price of 0.00."""
-    days = [("2024-01-02", 4.11e-06), ("2024-01-03", 4.35e-06)]
-    coord = _coord(hass, history=None)
-    patcher, _ = mock_http(make_yahoo_payload(days_prices=days, meta_price=4.35e-06))
-
-    with patcher:
+    page.async_get_funds.return_value = {SYMBOL: quote()}
+    with caplog.at_level(logging.INFO):
         data = await coord._async_update_data()
 
-    assert data["current_price"] == pytest.approx(4.35e-06)
-    assert data["previous_close"] == pytest.approx(4.11e-06)
-
-
-async def test_the_stored_daily_history_keeps_sub_cent_prices(hass):
-    """The 1M/YTD/1J charts read this store, so it must survive the same rounding."""
-    days = [("2024-01-02", 4.11e-06), ("2024-01-03", 4.35e-06)]
-    coord = _coord(hass, history=None)
-    patcher, _ = mock_http(make_yahoo_payload(days_prices=days))
-
-    with patcher:
-        await coord._async_update_data()
-
-    assert [p for _, p in coord._history] == pytest.approx([4.11e-06, 4.35e-06])
-
-
-async def test_a_seven_cent_quote_keeps_more_than_four_decimals(hass):
-    """0.0001 on a 0.07 quote is a 0.14 % step — wider than a quiet day."""
-    days = [("2024-01-02", 0.070113), ("2024-01-03", 0.071372)]
-    coord = _coord(hass, history=None)
-    patcher, _ = mock_http(make_yahoo_payload(days_prices=days, meta_price=0.071372))
-
-    with patcher:
-        data = await coord._async_update_data()
-
-    assert data["current_price"] == pytest.approx(0.071372)
-
-
-async def test_an_ordinary_quote_is_unaffected(hass):
-    """The change must not regress for the prices the card already handled."""
-    days = [("2024-01-02", 445.2), ("2024-01-03", 450.6)]
-    coord = _coord(hass, history=None)
-    patcher, _ = mock_http(make_yahoo_payload(days_prices=days, meta_price=450.6))
-
-    with patcher:
-        data = await coord._async_update_data()
-
-    assert data["current_price"] == pytest.approx(450.6)
-    assert data["previous_close"] == pytest.approx(445.2)
-    assert data["change"] == pytest.approx(5.4)
-
-
-# ---------------------------------------------------------------------------
-# Day boundary (issue #17)
-# ---------------------------------------------------------------------------
-
-
-async def test_a_stock_has_not_traded_today_in_the_local_hours_before_utc_midnight(hass, freezer):
-    """Saturday 00:30 in Berlin is still Friday in UTC.
-
-    The card cuts its 1T series at *local* midnight, so while the coordinator
-    called Friday "today" it kept writing Yahoo's post-close revisions of the
-    Friday price into what the card reads as Saturday. Those two hours of noise
-    were the entire content of the weekend chart.
-    """
-    await hass.config.async_set_time_zone("Europe/Berlin")
-    freezer.move_to("2024-05-31T22:30:00+00:00")  # Sat 00:30 local, Fri 22:30 UTC
-
-    days = [("2024-05-30", 100.0), ("2024-05-31", 101.0)]  # last session: Friday
-    coord = _coord(hass, history=None)
-    patcher, _ = mock_http(
-        make_yahoo_payload(
-            days_prices=days,
-            meta_price=101.0,
-            trading_period=make_trading_period(open_now=False),
-        )
-    )
-
-    with patcher:
-        data = await coord._async_update_data()
-
-    assert data["traded_today"] is False
-
-
-async def test_a_stock_has_traded_today_while_its_session_is_running(hass, freezer):
-    """Guard for the above: the ordinary case must keep reporting True."""
-    await hass.config.async_set_time_zone("Europe/Berlin")
-    freezer.move_to("2024-05-31T13:00:00+00:00")  # Fri 15:00 local, mid-session
-
-    days = [("2024-05-30", 100.0), ("2024-05-31", 101.0)]
-    coord = _coord(hass, history=None)
-    patcher, _ = mock_http(
-        make_yahoo_payload(
-            days_prices=days,
-            meta_price=101.0,
-            trading_period=make_trading_period(open_now=True),
-        )
-    )
-
-    with patcher:
-        data = await coord._async_update_data()
-
-    assert data["traded_today"] is True
-
-
-# ---------------------------------------------------------------------------
-# traded_today from Yahoo's last trade timestamp (issue #17, gold on a weekend)
-# ---------------------------------------------------------------------------
-
-GOLD_DAYS = [("2026-09-03", 4491.70), ("2026-09-04", 4429.80)]
-GOLD_LAST_TRADE = int(datetime(2026, 9, 4, 19, 0, tzinfo=timezone.utc).timestamp())
-
-
-async def test_a_future_that_rested_all_weekend_has_not_traded_today(hass, freezer):
-    """Gold's daily candle is the pit close, regularMarketPrice the electronic one.
-
-    The two sat 1.06 % apart over the weekend, and the old rule read any such
-    difference as "a session must be running", so the card drew a rising line
-    for an asset that had not traded since Friday.
-    """
-    await hass.config.async_set_time_zone("Europe/Berlin")
-    freezer.move_to("2026-09-05T09:15:00+00:00")  # Sat 11:15 local
-
-    coord = _coord(hass, history=None)
-    patcher, _ = mock_http(
-        make_yahoo_payload(
-            days_prices=GOLD_DAYS,
-            meta_price=4476.60,
-            market_time=GOLD_LAST_TRADE,
-            trading_period=make_trading_period(open_now=False),
-        )
-    )
-
-    with patcher:
-        data = await coord._async_update_data()
-
-    assert data["traded_today"] is False
-    # still the last price anyone paid, not the pit close
-    assert data["current_price"] == pytest.approx(4476.60)
-    # the close before Friday's session, so the change describes Friday
-    assert data["previous_close"] == pytest.approx(4491.70)
-
-
-async def test_a_running_session_counts_before_yahoo_writes_todays_candle(hass, freezer):
-    """The case the old rule existed for, and which must keep working."""
-    await hass.config.async_set_time_zone("Europe/Berlin")
-    freezer.move_to("2026-09-08T09:15:00+00:00")  # Tue 11:15 local
-
-    coord = _coord(hass, history=None)
-    patcher, _ = mock_http(
-        make_yahoo_payload(
-            days_prices=[("2026-09-04", 100.0), ("2026-09-07", 101.0)],
-            meta_price=102.0,
-            market_time=int(datetime(2026, 9, 8, 9, 10, tzinfo=timezone.utc).timestamp()),
-            trading_period=make_trading_period(open_now=True),
-        )
-    )
-
-    with patcher:
-        data = await coord._async_update_data()
-
-    assert data["traded_today"] is True
-    assert data["current_price"] == pytest.approx(102.0)
-    assert data["previous_close"] == pytest.approx(101.0)
-
-
-async def test_without_a_last_trade_timestamp_the_price_heuristic_still_applies(hass, freezer):
-    """Yahoo has dropped fields before; the old rule stays as the fallback."""
-    await hass.config.async_set_time_zone("Europe/Berlin")
-    freezer.move_to("2026-09-08T09:15:00+00:00")
-
-    coord = _coord(hass, history=None)
-    patcher, _ = mock_http(
-        make_yahoo_payload(
-            days_prices=[("2026-09-04", 100.0), ("2026-09-07", 101.0)],
-            meta_price=102.0,
-            trading_period=make_trading_period(open_now=True),
-        )
-    )
-
-    with patcher:
-        data = await coord._async_update_data()
-
-    assert data["traded_today"] is True
+    assert SYMBOL in data
+    assert f"Fund {SYMBOL} is listed on the Zwitserleven page again" in caplog.text
