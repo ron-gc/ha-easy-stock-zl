@@ -1,5 +1,11 @@
 # Zwitserleven Fondsen — Home Assistant Integration
 
+[![Tests](https://github.com/ron-gc/ha-zwitserleven-fondsen/actions/workflows/tests.yml/badge.svg)](https://github.com/ron-gc/ha-zwitserleven-fondsen/actions/workflows/tests.yml)
+[![hassfest](https://github.com/ron-gc/ha-zwitserleven-fondsen/actions/workflows/hassfest.yml/badge.svg)](https://github.com/ron-gc/ha-zwitserleven-fondsen/actions/workflows/hassfest.yml)
+[![Release](https://img.shields.io/github/v/release/ron-gc/ha-zwitserleven-fondsen)](https://github.com/ron-gc/ha-zwitserleven-fondsen/releases)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.1%2B-41BDF5?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
+[![License: MIT](https://img.shields.io/github/license/ron-gc/ha-zwitserleven-fondsen)](LICENSE)
+
 > Track Zwitserleven investment funds in Home Assistant, with a built-in Lovelace card featuring sparkline charts.
 
 **No API key required. Fully configured through the UI — no YAML needed.**
@@ -193,6 +199,10 @@ npm run build   # type-checks and rebuilds custom_components/zwitserleven_fondse
 npm test        # card tests
 pytest          # integration tests, needs Python 3.14 (see requirements_test.txt)
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
 ## License
 
