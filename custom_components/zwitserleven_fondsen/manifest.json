@@ -12,9 +12,9 @@
     "http",
     "lovelace"
   ],
-  "documentation": "https://github.com/ron-gc/ha-easy-stock-zl",
+  "documentation": "https://github.com/ron-gc/ha-zwitserleven-fondsen",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/ron-gc/ha-easy-stock-zl/issues",
+  "issue_tracker": "https://github.com/ron-gc/ha-zwitserleven-fondsen/issues",
   "requirements": [
     "beautifulsoup4>=4.9.0"
   ],

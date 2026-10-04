@@ -86,7 +86,7 @@ If the card is still missing:
 4. Force a reload past the browser and service-worker cache — see [After updating](#after-updating).
    Opening the dashboard in a private window rules caching out entirely.
 
-If none of that helps, please [open an issue](https://github.com/ron-gc/ha-easy-stock-zl/issues) and
+If none of that helps, please [open an issue](https://github.com/ron-gc/ha-zwitserleven-fondsen/issues) and
 include the console line from step 2 and the `zwitserleven_fondsen.frontend` log lines from step 3.
 
 > **Adding the resource manually is a last resort.** If you do, use the plain URL

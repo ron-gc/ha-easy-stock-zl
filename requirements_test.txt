@@ -1,5 +1,6 @@
 pytest>=8.0
 pytest-asyncio>=0.23
+beautifulsoup4>=4.9.0  # the integration's own requirement, see manifest.json
 # Pinned on purpose. Every release of this package pins one exact Home
 # Assistant core, so an unpinned range makes CI silently follow core -- betas
 # included. That has teeth here: core derives the Lovelace resource mode as
