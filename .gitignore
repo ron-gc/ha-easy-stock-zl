@@ -19,3 +19,6 @@ BACKLOG.md
 
 # AI context (not part of the project)
 CLAUDE.md
+
+# Data of the local test instance, see dev/compose.yaml
+dev/config/

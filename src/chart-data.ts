@@ -1,15 +1,13 @@
 import type { TimeRange } from "./types";
 
-export const HA_HISTORY_RANGES: TimeRange[] = ["1T", "1W"];
-
 export interface ChartDataInput {
-  /** Recorder series for the selected range, or null when none is cached. */
-  haData: [string, number][] | null;
+  /** Stored daily prices as ["YYYY-MM-DD", price], oldest first, keyed by price date. */
   dailyHistory: [string, number][];
   range: TimeRange;
+  /** The sensor's current price ... */
   livePrice: number;
-  previousClose: number;
-  now?: Date;
+  /** ... and the date Zwitserleven published it for. */
+  priceDate?: string;
 }
 
 /** Local "YYYY-MM-DD" for `d`. */
@@ -17,82 +15,61 @@ function dayStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** The day `days` days, or `years` years, before the "YYYY-MM-DD" day `day`. */
+function daysBefore(day: string, days: number, years = 0): string {
+  const [y, m, d] = day.split("-").map(Number);
+  return dayStr(new Date(y - years, m - 1, d - days));
+}
+
 /**
- * Build the chart series for the selected range.
- * 1T / 1W: HA recorder history, falling back to sensor attributes.
- * 1M / YTD / 1J: the stored daily prices.
+ * The daily prices with the sensor's current price merged in under its own
+ * price date. The stored history normally already holds it; merging covers
+ * the moment between a new price arriving and the card refetching the history.
+ */
+function withLivePrice(input: ChartDataInput): [string, number][] {
+  const { dailyHistory, livePrice, priceDate } = input;
+  if (!priceDate || !Number.isFinite(livePrice)) return dailyHistory;
+  const last = dailyHistory[dailyHistory.length - 1];
+  if (!last || last[0] < priceDate) return [...dailyHistory, [priceDate, livePrice]];
+  if (last[0] === priceDate) return [...dailyHistory.slice(0, -1), [priceDate, livePrice]];
+  return dailyHistory; // an older price than the history already has
+}
+
+/**
+ * Build the chart series for the selected range from the daily prices, dated
+ * by the day each price was published for, never by when it was fetched.
+ *
+ * Ranges count back from the latest price date rather than from today, so the
+ * day or two Zwitserleven takes to publish a price doesn't shorten them.
+ * 1T is the latest price against the one before it.
  */
 export function buildChartData(input: ChartDataInput): [string, number][] {
-  const { haData, dailyHistory, range, livePrice, previousClose } = input;
-  const now = input.now ?? new Date();
-  const today = dayStr(now);
+  const prices = withLivePrice(input);
+  if (prices.length <= 2) return prices;
 
-  if (HA_HISTORY_RANGES.includes(range)) {
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-    const midnightISO = todayStart.toISOString();
+  const latest = prices[prices.length - 1][0];
+  const lastTwo = prices.slice(-2);
+  const since = (from: string) => {
+    const inRange = prices.filter(([d]) => d >= from);
+    return inRange.length >= 2 ? inRange : lastTwo;
+  };
 
-    if (range === "1T") {
-      // The integration computes previous_close against the day before the
-      // published price. The last stored daily price is no baseline here: prices
-      // are published a day or more late, so it usually *is* the live price.
-      const prev = previousClose > 0 ? previousClose : livePrice;
-
-      // Filter to today, then anchor at midnight with the previous close. Repeating
-      // it at the first real timestamp keeps the line flat from midnight to the
-      // first update instead of drawing a misleading diagonal.
-      if (haData && haData.length >= 1) {
-        const todayData = haData.filter(([t]) => new Date(t) >= todayStart);
-        if (todayData.length >= 1) {
-          const series: [string, number][] = [[midnightISO, prev], [todayData[0][0], prev], ...todayData];
-          // The recorder only stores a row when the value changes, and the card
-          // caches its history for HA_HISTORY_TTL. Both leave this series behind
-          // the live state, so the tile showed a percentage computed from a stale
-          // endpoint next to a current price, and the line stopped at the last
-          // change rather than at now.
-          if (Number.isFinite(livePrice)) series.push([now.toISOString(), livePrice]);
-          return series;
-        }
-      }
-
-      // Fallback: prev close at midnight → current price now.
-      return [[midnightISO, prev], [now.toISOString(), livePrice]];
+  switch (input.range) {
+    case "1T":
+      return lastTwo;
+    case "1W":
+      return since(daysBefore(latest, 7));
+    case "1M":
+      return since(daysBefore(latest, 30));
+    case "YTD": {
+      // The previous year's last price is the YTD baseline.
+      const jan1 = `${latest.slice(0, 4)}-01-01`;
+      const before = prices.filter(([d]) => d < jan1);
+      const thisYear = prices.filter(([d]) => d >= jan1);
+      const series = before.length > 0 ? [before[before.length - 1], ...thisYear] : thisYear;
+      return series.length >= 2 ? series : lastTwo;
     }
-
-    // 1W: recorder data
-    if (haData && haData.length >= 2) return haData;
-    // 1W fallback: last 4 daily prices + live price
-    const base = dailyHistory.slice(-4);
-    return base.length > 0 ? [...base, [today, livePrice]] : [["prev", previousClose], [today, livePrice]];
+    case "1J":
+      return since(daysBefore(latest, 0, 1));
   }
-
-  // 1M / YTD / 1J — stored daily prices
-  let base: [string, number][];
-  if (range === "1M") {
-    const cutoff = new Date(now);
-    cutoff.setDate(cutoff.getDate() - 30);
-    const cutoffStr = cutoff.toISOString().slice(0, 10);
-    const filtered = dailyHistory.filter(([d]) => d >= cutoffStr);
-    base = filtered.length >= 2 ? filtered : dailyHistory.slice(-2);
-  } else if (range === "YTD") {
-    const jan1 = `${now.getFullYear()}-01-01`;
-    const filtered = dailyHistory.filter(([d]) => d >= jan1);
-    // Prepend the previous year's last price as the YTD baseline.
-    const prevYearEntries = dailyHistory.filter(([d]) => d < jan1);
-    const prevYearClose = prevYearEntries[prevYearEntries.length - 1];
-    base = prevYearClose
-      ? [prevYearClose, ...filtered]
-      : (filtered.length >= 2 ? filtered : dailyHistory.slice(-2));
-  } else {
-    // 1J — the history is kept indefinitely, so cut it to the last year.
-    const cutoff = new Date(now);
-    cutoff.setFullYear(cutoff.getFullYear() - 1);
-    const cutoffStr = dayStr(cutoff);
-    base = dailyHistory.filter(([d]) => d >= cutoffStr);
-  }
-
-  if (base.length === 0) return [[today, livePrice]];
-  const last = base[base.length - 1];
-  if (last[0] === today) return [...base.slice(0, -1), [today, livePrice]];
-  return [...base, [today, livePrice]];
 }

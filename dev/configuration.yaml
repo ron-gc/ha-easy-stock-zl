@@ -1,0 +1,9 @@
+# Configuration of the throwaway test instance in dev/compose.yaml.
+
+# The usual set of integrations a fresh Home Assistant starts with.
+default_config:
+
+logger:
+  default: warning
+  logs:
+    custom_components.zwitserleven_fondsen: debug

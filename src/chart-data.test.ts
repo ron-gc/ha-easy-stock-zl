@@ -1,90 +1,88 @@
 import { describe, it, expect } from "vitest";
 import { buildChartData } from "./chart-data";
 
-// A fixed local Friday afternoon, so midnight and "now" are unambiguous.
-const NOW = new Date(2026, 8, 4, 14, 30, 0);
-const MIDNIGHT = new Date(2026, 8, 4, 0, 0, 0);
-const at = (h: number, m = 0) => new Date(2026, 8, 4, h, m, 0).toISOString();
-const YESTERDAY_EVENING = new Date(2026, 8, 3, 22, 0, 0).toISOString();
+/** One price per weekday between two dates, ascending by 1 from `start`. */
+function weekdays(from: string, to: string, start = 100): [string, number][] {
+  const out: [string, number][] = [];
+  const [y, m, d] = from.split("-").map(Number);
+  let price = start;
+  for (let day = new Date(y, m - 1, d); ; day.setDate(day.getDate() + 1)) {
+    const s = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+    if (s > to) break;
+    if (day.getDay() !== 0 && day.getDay() !== 6) out.push([s, price++]);
+  }
+  return out;
+}
 
-const base = {
-  dailyHistory: [["2026-09-02", 98.0], ["2026-09-03", 99.0]] as [string, number][],
-  range: "1T" as const,
-  livePrice: 101,
-  previousClose: 99,
-  now: NOW,
-};
+const dates = (series: [string, number][]) => series.map(([d]) => d);
 
-describe("buildChartData — 1T", () => {
-  it("ends the series at the live price, so the tile's percentage matches the price beside it", () => {
-    // The recorder only writes a row when the value changes, and the card caches
-    // its history for five minutes — both leave the series behind the live state.
-    const data = buildChartData({ ...base, haData: [[at(10), 100], [at(11), 100.5]] });
+describe("buildChartData — dated by price date", () => {
+  const history = weekdays("2026-09-01", "2026-10-09"); // Tue 1 Sep – Fri 9 Oct
+  const latest = history[history.length - 1];
 
-    expect(data[data.length - 1][1]).toBe(101);
+  it("never dates a point by today; the latest price stays under its own date", () => {
+    for (const range of ["1T", "1W", "1M", "YTD", "1J"] as const) {
+      const data = buildChartData({ dailyHistory: history, range, livePrice: latest[1], priceDate: latest[0] });
+      expect(data[data.length - 1]).toEqual(latest);
+    }
   });
 
-  it("carries the line up to now when the price has not moved since the last row", () => {
-    const data = buildChartData({ ...base, livePrice: 100, haData: [[at(10), 100]] });
-
-    expect(data[data.length - 1]).toEqual([NOW.toISOString(), 100]);
+  it("1T is the latest price against the one before it", () => {
+    const data = buildChartData({ dailyHistory: history, range: "1T", livePrice: latest[1], priceDate: latest[0] });
+    expect(data).toEqual(history.slice(-2));
   });
 
-  it("anchors the day on the previous close from midnight to the first row", () => {
-    const data = buildChartData({ ...base, haData: [[at(10), 100]] });
-
-    expect(data[0]).toEqual([MIDNIGHT.toISOString(), 99]);
-    expect(data[1]).toEqual([at(10), 99]);
+  it("1W counts back seven days from the latest price date, not from today", () => {
+    const data = buildChartData({ dailyHistory: history, range: "1W", livePrice: latest[1], priceDate: latest[0] });
+    expect(dates(data)).toEqual(["2026-10-02", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09"]);
   });
 
-  it("leaves yesterday's rows out of today's chart", () => {
-    const data = buildChartData({ ...base, haData: [[YESTERDAY_EVENING, 90], [at(10), 100]] });
-
-    expect(data.map((p) => p[1])).not.toContain(90);
+  it("1M covers the last 30 days of prices", () => {
+    const data = buildChartData({ dailyHistory: history, range: "1M", livePrice: latest[1], priceDate: latest[0] });
+    expect(data[0][0]).toBe("2026-09-09");
   });
 
-  it("stops the line at the current time instead of the right edge", () => {
-    const data = buildChartData({ ...base, haData: null });
-
-    expect(data[0][0]).toBe(MIDNIGHT.toISOString());
-    expect(data[data.length - 1][0]).toBe(NOW.toISOString());
+  it("YTD starts from the previous year's last price", () => {
+    const dailyHistory = weekdays("2025-12-29", "2026-01-09");
+    const last = dailyHistory[dailyHistory.length - 1];
+    const data = buildChartData({ dailyHistory, range: "YTD", livePrice: last[1], priceDate: last[0] });
+    expect(data[0][0]).toBe("2025-12-31");
   });
 
-  it("falls back to previous close and live price when the recorder holds nothing for today", () => {
-    const data = buildChartData({ ...base, haData: [[YESTERDAY_EVENING, 90]] });
-
-    expect(data[0][1]).toBe(99);
-    expect(data[data.length - 1][1]).toBe(101);
+  it("1J limits the range to the last year of prices", () => {
+    const dailyHistory = weekdays("2025-09-01", "2026-10-09");
+    const last = dailyHistory[dailyHistory.length - 1];
+    const data = buildChartData({ dailyHistory, range: "1J", livePrice: last[1], priceDate: last[0] });
+    expect(data[0][0]).toBe("2025-10-09");
   });
-});
 
-describe("buildChartData — 1T baseline", () => {
-  it("uses previous_close even when the latest stored price is from an earlier day", () => {
-    // Prices are published late: the newest stored entry is the live price itself.
-    const dailyHistory: [string, number][] = [["2026-09-01", 99], ["2026-09-02", 101]];
-    const data = buildChartData({ ...base, dailyHistory, haData: null });
-
-    expect(data[0][1]).toBe(99);
-    expect(data[data.length - 1][1]).toBe(101);
+  it("falls back to the last two prices when a range holds fewer", () => {
+    const dailyHistory: [string, number][] = [["2026-08-01", 90], ["2026-10-09", 100]];
+    const data = buildChartData({ dailyHistory, range: "1W", livePrice: 100, priceDate: "2026-10-09" });
+    expect(data).toEqual(dailyHistory);
   });
 });
 
-describe("buildChartData — other ranges", () => {
-  it("returns the recorder week as it stands for 1W", () => {
-    const week: [string, number][] = [[at(9), 97], [at(10), 98]];
-    expect(buildChartData({ ...base, range: "1W", haData: week })).toEqual(week);
+describe("buildChartData — merging the sensor's price", () => {
+  const dailyHistory: [string, number][] = [["2026-10-07", 98], ["2026-10-08", 99]];
+
+  it("appends a newer price under its price date", () => {
+    const data = buildChartData({ dailyHistory, range: "1W", livePrice: 101, priceDate: "2026-10-09" });
+    expect(data[data.length - 1]).toEqual(["2026-10-09", 101]);
   });
 
-  it("closes a daily range with today's live price", () => {
-    const data = buildChartData({ ...base, range: "1J", haData: null });
-
-    expect(data[data.length - 1]).toEqual(["2026-09-04", 101]);
+  it("replaces a corrected price for the same date", () => {
+    const data = buildChartData({ dailyHistory, range: "1W", livePrice: 99.5, priceDate: "2026-10-08" });
+    expect(data).toEqual([["2026-10-07", 98], ["2026-10-08", 99.5]]);
   });
 
-  it("limits 1J to the last year of stored prices", () => {
-    const dailyHistory: [string, number][] = [["2025-09-03", 80], ["2025-09-04", 81], ["2026-09-03", 99]];
-    const data = buildChartData({ ...base, dailyHistory, range: "1J", haData: null });
+  it("ignores a price older than the history", () => {
+    const data = buildChartData({ dailyHistory, range: "1W", livePrice: 50, priceDate: "2026-10-01" });
+    expect(data).toEqual(dailyHistory);
+  });
 
-    expect(data.map(([d]) => d)).toEqual(["2025-09-04", "2026-09-03", "2026-09-04"]);
+  it("returns the single stored price on the first day", () => {
+    const data = buildChartData({ dailyHistory: [], range: "1M", livePrice: 228.27, priceDate: "2026-10-09" });
+    expect(data).toEqual([["2026-10-09", 228.27]]);
   });
 });
