@@ -1,0 +1,27 @@
+# A throwaway Home Assistant for testing this integration in isolation.
+#
+#   docker compose -f dev/compose.yaml up -d      start, then open http://localhost:8123
+#   docker compose -f dev/compose.yaml restart    pick up code changes
+#   docker compose -f dev/compose.yaml down       stop
+#
+# Everything this instance stores lives in dev/config/ (ignored by git).
+# Delete that folder to start over with a fresh Home Assistant.
+
+name: zwitserleven-fondsen-dev
+
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: zwitserleven-fondsen-dev
+    restart: "no"
+    ports:
+      - "8123:8123"
+    environment:
+      TZ: Europe/Amsterdam
+    volumes:
+      - ./config:/config
+      # The integration straight from the repository, read-only: edit it here,
+      # then restart the container.
+      - ../custom_components/zwitserleven_fondsen:/config/custom_components/zwitserleven_fondsen:ro
+      # Debug logging for the integration; see configuration.yaml next to this file.
+      - ./configuration.yaml:/config/configuration.yaml:ro

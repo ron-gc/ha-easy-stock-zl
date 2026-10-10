@@ -200,6 +200,22 @@ npm test        # card tests
 pytest          # integration tests, needs Python 3.14 (see requirements_test.txt)
 ```
 
+### Trying it out in a test Home Assistant
+
+[dev/compose.yaml](dev/compose.yaml) starts a separate Home Assistant in Docker (Docker Desktop
+works on Windows), with this integration mounted straight from the repository. It does not touch
+any other Home Assistant you run.
+
+```sh
+docker compose -f dev/compose.yaml up -d     # then open http://localhost:8123
+docker compose -f dev/compose.yaml restart   # after changing the integration or rebuilding the card
+docker compose -f dev/compose.yaml logs -f   # follow the log; this integration logs at debug level
+docker compose -f dev/compose.yaml down      # stop
+```
+
+The first start asks you to create a user. Everything the test instance stores lives in
+`dev/config/`, which git ignores; delete that folder to start over from scratch.
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
