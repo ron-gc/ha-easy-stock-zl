@@ -890,7 +890,8 @@ const SPARKLINE_WIDTH = 200;
 const SPARKLINE_HEIGHT = 48;
 const SPARKLINE_PAD = 2;
 const MIN_RELATIVE_SPAN = 1e-3;
-function sparklinePoints(history, range, now = /* @__PURE__ */ new Date()) {
+function sparklinePoints(history) {
+  if (history.length === 1) history = [history[0], history[0]];
   const prices = history.map(([, p2]) => p2);
   const min = Math.min(...prices);
   const max = Math.max(...prices);
@@ -899,69 +900,55 @@ function sparklinePoints(history, range, now = /* @__PURE__ */ new Date()) {
   const low = mid - span / 2;
   const innerW = SPARKLINE_WIDTH - SPARKLINE_PAD * 2;
   const innerH = SPARKLINE_HEIGHT - SPARKLINE_PAD * 2;
-  const isIntraday = range === "1T" && history[0][0].includes("T");
-  const todayStart = new Date(now);
-  todayStart.setHours(0, 0, 0, 0);
-  const dayMs = 24 * 60 * 60 * 1e3;
-  return history.map(([t2, p2], i2) => {
-    const xFrac = isIntraday ? Math.max(0, Math.min(1, (new Date(t2).getTime() - todayStart.getTime()) / dayMs)) : i2 / (history.length - 1);
+  return history.map(([, p2], i2) => {
+    const xFrac = i2 / (history.length - 1);
     return {
       x: SPARKLINE_PAD + xFrac * innerW,
       y: SPARKLINE_PAD + (1 - (p2 - low) / span) * innerH
     };
   });
 }
-const HA_HISTORY_RANGES = ["1T", "1W"];
 function dayStr(d2) {
   return `${d2.getFullYear()}-${String(d2.getMonth() + 1).padStart(2, "0")}-${String(d2.getDate()).padStart(2, "0")}`;
 }
+function daysBefore(day, days, years = 0) {
+  const [y3, m2, d2] = day.split("-").map(Number);
+  return dayStr(new Date(y3 - years, m2 - 1, d2 - days));
+}
+function withLivePrice(input) {
+  const { dailyHistory, livePrice, priceDate } = input;
+  if (!priceDate || !Number.isFinite(livePrice)) return dailyHistory;
+  const last = dailyHistory[dailyHistory.length - 1];
+  if (!last || last[0] < priceDate) return [...dailyHistory, [priceDate, livePrice]];
+  if (last[0] === priceDate) return [...dailyHistory.slice(0, -1), [priceDate, livePrice]];
+  return dailyHistory;
+}
 function buildChartData(input) {
-  const { haData, dailyHistory, range, livePrice, previousClose } = input;
-  const now = input.now ?? /* @__PURE__ */ new Date();
-  const today = dayStr(now);
-  if (HA_HISTORY_RANGES.includes(range)) {
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-    const midnightISO = todayStart.toISOString();
-    if (range === "1T") {
-      const prev = previousClose > 0 ? previousClose : livePrice;
-      if (haData && haData.length >= 1) {
-        const todayData = haData.filter(([t2]) => new Date(t2) >= todayStart);
-        if (todayData.length >= 1) {
-          const series = [[midnightISO, prev], [todayData[0][0], prev], ...todayData];
-          if (Number.isFinite(livePrice)) series.push([now.toISOString(), livePrice]);
-          return series;
-        }
-      }
-      return [[midnightISO, prev], [now.toISOString(), livePrice]];
+  const prices = withLivePrice(input);
+  if (prices.length <= 2) return prices;
+  const latest = prices[prices.length - 1][0];
+  const lastTwo = prices.slice(-2);
+  const since = (from) => {
+    const inRange = prices.filter(([d2]) => d2 >= from);
+    return inRange.length >= 2 ? inRange : lastTwo;
+  };
+  switch (input.range) {
+    case "1T":
+      return lastTwo;
+    case "1W":
+      return since(daysBefore(latest, 7));
+    case "1M":
+      return since(daysBefore(latest, 30));
+    case "YTD": {
+      const jan1 = `${latest.slice(0, 4)}-01-01`;
+      const before = prices.filter(([d2]) => d2 < jan1);
+      const thisYear = prices.filter(([d2]) => d2 >= jan1);
+      const series = before.length > 0 ? [before[before.length - 1], ...thisYear] : thisYear;
+      return series.length >= 2 ? series : lastTwo;
     }
-    if (haData && haData.length >= 2) return haData;
-    const base2 = dailyHistory.slice(-4);
-    return base2.length > 0 ? [...base2, [today, livePrice]] : [["prev", previousClose], [today, livePrice]];
+    case "1J":
+      return since(daysBefore(latest, 0, 1));
   }
-  let base;
-  if (range === "1M") {
-    const cutoff = new Date(now);
-    cutoff.setDate(cutoff.getDate() - 30);
-    const cutoffStr = cutoff.toISOString().slice(0, 10);
-    const filtered = dailyHistory.filter(([d2]) => d2 >= cutoffStr);
-    base = filtered.length >= 2 ? filtered : dailyHistory.slice(-2);
-  } else if (range === "YTD") {
-    const jan1 = `${now.getFullYear()}-01-01`;
-    const filtered = dailyHistory.filter(([d2]) => d2 >= jan1);
-    const prevYearEntries = dailyHistory.filter(([d2]) => d2 < jan1);
-    const prevYearClose = prevYearEntries[prevYearEntries.length - 1];
-    base = prevYearClose ? [prevYearClose, ...filtered] : filtered.length >= 2 ? filtered : dailyHistory.slice(-2);
-  } else {
-    const cutoff = new Date(now);
-    cutoff.setFullYear(cutoff.getFullYear() - 1);
-    const cutoffStr = dayStr(cutoff);
-    base = dailyHistory.filter(([d2]) => d2 >= cutoffStr);
-  }
-  if (base.length === 0) return [[today, livePrice]];
-  const last = base[base.length - 1];
-  if (last[0] === today) return [...base.slice(0, -1), [today, livePrice]];
-  return [...base, [today, livePrice]];
 }
 var __defProp = Object.defineProperty;
 var __decorateClass = (decorators, target, key, kind) => {
@@ -1276,14 +1263,11 @@ __decorateClass([
 __decorateClass([
   r()
 ], ZwitserlevenFondsenCardEditor.prototype, "_dragIndex");
-const HA_HISTORY_TTL = 5 * 60 * 1e3;
 const DAILY_HISTORY_TTL = 60 * 60 * 1e3;
 const _ZwitserlevenFondsenCard = class _ZwitserlevenFondsenCard extends i {
   constructor() {
     super(...arguments);
     this._timeRange = "1T";
-    this._haCache = /* @__PURE__ */ new Map();
-    this._fetching = /* @__PURE__ */ new Set();
     this._dailyHistoryCache = /* @__PURE__ */ new Map();
     this._fetchingDaily = /* @__PURE__ */ new Set();
   }
@@ -1318,41 +1302,6 @@ const _ZwitserlevenFondsenCard = class _ZwitserlevenFondsenCard extends i {
     return document.createElement(EDITOR_TAG);
   }
   // -------------------------------------------------------------------------
-  // HA history cache
-  // -------------------------------------------------------------------------
-  _cacheKey(entityId, range) {
-    return `${entityId}:${range}`;
-  }
-  _cachedHaHistory(entityId, range) {
-    const entry = this._haCache.get(this._cacheKey(entityId, range));
-    if (!entry || Date.now() - entry.fetchedAt > HA_HISTORY_TTL) return null;
-    return entry.data;
-  }
-  async _fetchHaHistory(entityId, range) {
-    const key = this._cacheKey(entityId, range);
-    if (this._fetching.has(key)) return;
-    const existing = this._haCache.get(key);
-    if (existing && Date.now() - existing.fetchedAt < HA_HISTORY_TTL) return;
-    this._fetching.add(key);
-    try {
-      const start = /* @__PURE__ */ new Date();
-      if (range === "1T") start.setDate(start.getDate() - 1);
-      else start.setDate(start.getDate() - 7);
-      const result = await this._hass.callApi(
-        "GET",
-        `history/period/${start.toISOString()}?filter_entity_id=${entityId}&minimal_response=true&no_attributes=true&significant_changes_only=false`
-      );
-      const states = (result == null ? void 0 : result[0]) ?? [];
-      const data = states.map((s2) => [s2.last_changed, parseFloat(s2.state)]).filter(([, p2]) => !isNaN(p2));
-      this._haCache.set(key, { data, fetchedAt: Date.now() });
-      this.requestUpdate();
-    } catch (err) {
-      console.warn(`${LOG_PREFIX} HA history fetch failed for ${entityId}:`, err);
-    } finally {
-      this._fetching.delete(key);
-    }
-  }
-  // -------------------------------------------------------------------------
   // Daily price cache (fetched from /api/zwitserleven_fondsen/history)
   // -------------------------------------------------------------------------
   _cachedDailyHistory(symbol) {
@@ -1380,8 +1329,8 @@ const _ZwitserlevenFondsenCard = class _ZwitserlevenFondsenCard extends i {
   // -------------------------------------------------------------------------
   // Chart data helpers
   // -------------------------------------------------------------------------
-  _calcPeriodChange(chartData, range, dailyChangePct) {
-    if (chartData.length < 2) return range === "1T" ? dailyChangePct : 0;
+  _calcPeriodChange(chartData) {
+    if (chartData.length < 2) return 0;
     const oldest = chartData[0][1];
     const newest = chartData[chartData.length - 1][1];
     return oldest !== 0 ? (newest - oldest) / oldest * 100 : 0;
@@ -1440,18 +1389,14 @@ const _ZwitserlevenFondsenCard = class _ZwitserlevenFondsenCard extends i {
     const locale = (_e = (_d = this._hass) == null ? void 0 : _d.locale) == null ? void 0 : _e.language;
     const price = parseFloat(entity.state);
     void this._fetchDailyHistory(attr.symbol);
-    if (HA_HISTORY_RANGES.includes(this._timeRange)) {
-      void this._fetchHaHistory(entityId, this._timeRange);
-    }
-    const dailyHistory = this._cachedDailyHistory(attr.symbol) ?? [];
     const chartData = buildChartData({
-      haData: HA_HISTORY_RANGES.includes(this._timeRange) ? this._cachedHaHistory(entityId, this._timeRange) : null,
-      dailyHistory,
+      dailyHistory: this._cachedDailyHistory(attr.symbol) ?? [],
       range: this._timeRange,
       livePrice: price,
-      previousClose: attr.previous_close ?? 0
+      priceDate: attr.price_date
     });
-    const periodChange = this._calcPeriodChange(chartData, this._timeRange, attr.change_pct ?? 0);
+    const periodChange = this._calcPeriodChange(chartData);
+    const priceDate = formatPriceDate(attr.price_date, locale);
     const isPositive = periodChange >= 0;
     const trendColor = isPositive ? "var(--success-color, #4caf50)" : "var(--error-color, #f44336)";
     const arrow = isPositive ? "▲" : "▼";
@@ -1461,24 +1406,22 @@ const _ZwitserlevenFondsenCard = class _ZwitserlevenFondsenCard extends i {
       <div class="asset-tile" @click=${() => this._openMoreInfo(entityId)}>
         <div class="asset-header">
           <span class="asset-name" title="${displayName}">${displayName}</span>
-          <span class="asset-symbol">${attr.symbol}</span>
+          <span class="asset-meta">
+            <span class="asset-symbol">${attr.symbol}</span>
+            ${priceDate ? b` · <span title=${formatPriceDateLong(attr.price_date, locale)}>${priceDate}</span>` : A}
+          </span>
         </div>
         <div class="asset-price">
           <div class="price-stack">
             <span class="price">${formatPrice(price, locale)}</span>
             ${showRef ? b`<span class="ref-price">${formatPrice(refPrice, locale)}</span>` : A}
           </div>
-          <div class="change-stack">
-            <span class="change" style="color:${trendColor}">
-              <span class="arrow">${arrow}</span>${Math.abs(periodChange).toFixed(2)}%
-            </span>
-            <span class="price-date" title=${formatPriceDateLong(attr.price_date, locale)}>
-              ${formatPriceDate(attr.price_date, locale)}
-            </span>
-          </div>
+          <span class="change" style="color:${trendColor}">
+            <span class="arrow">${arrow}</span>${Math.abs(periodChange).toFixed(2)}%
+          </span>
         </div>
         <div class="sparkline-wrap">
-          ${this._renderSparkline(chartData, trendColor, this._timeRange)}
+          ${this._renderSparkline(chartData, trendColor)}
         </div>
       </div>
     `;
@@ -1490,9 +1433,9 @@ const _ZwitserlevenFondsenCard = class _ZwitserlevenFondsenCard extends i {
       composed: true
     }));
   }
-  _renderSparkline(history, color, range) {
-    if (history.length < 2) return A;
-    const points = sparklinePoints(history, range).map(({ x: x2, y: y3 }) => `${x2.toFixed(1)},${y3.toFixed(1)}`).join(" ");
+  _renderSparkline(history, color) {
+    if (history.length === 0) return A;
+    const points = sparklinePoints(history).map(({ x: x2, y: y3 }) => `${x2.toFixed(1)},${y3.toFixed(1)}`).join(" ");
     return w`
       <svg viewBox="0 0 ${SPARKLINE_WIDTH} ${SPARKLINE_HEIGHT}" preserveAspectRatio="none" class="sparkline-svg" aria-hidden="true">
         <polyline
@@ -1581,11 +1524,14 @@ _ZwitserlevenFondsenCard.styles = i$3`
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .asset-symbol {
+    .asset-meta {
       font-size: 0.7rem;
       color: var(--secondary-text-color);
-      font-family: monospace;
+      white-space: nowrap;
       flex-shrink: 0;
+    }
+    .asset-symbol {
+      font-family: monospace;
     }
     .asset-price {
       display: flex;
@@ -1605,16 +1551,6 @@ _ZwitserlevenFondsenCard.styles = i$3`
       white-space: nowrap;
     }
     .ref-price {
-      font-size: 0.7rem;
-      color: var(--secondary-text-color);
-      white-space: nowrap;
-    }
-    .change-stack {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-    }
-    .price-date {
       font-size: 0.7rem;
       color: var(--secondary-text-color);
       white-space: nowrap;

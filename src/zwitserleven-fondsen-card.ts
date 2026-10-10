@@ -9,7 +9,7 @@ import type {
 import { t } from "./translations";
 import { formatPrice, formatPriceDate, formatPriceDateLong } from "./format";
 import { sparklinePoints, SPARKLINE_HEIGHT, SPARKLINE_WIDTH } from "./sparkline";
-import { buildChartData, HA_HISTORY_RANGES } from "./chart-data";
+import { buildChartData } from "./chart-data";
 
 const DOMAIN = "zwitserleven_fondsen";
 const CARD_TAG = "zwitserleven-fondsen-card";
@@ -345,27 +345,12 @@ export class ZwitserlevenFondsenCardEditor extends LitElement {
 // Main card
 // ---------------------------------------------------------------------------
 
-interface HaHistoryState {
-  state: string;
-  last_changed: string;
-}
-
-interface HaHistoryCacheEntry {
-  data: [string, number][];
-  fetchedAt: number;
-}
-
-const HA_HISTORY_TTL = 5 * 60 * 1000; // 5 min
 const DAILY_HISTORY_TTL = 60 * 60 * 1000; // 1 h — prices change once a day
 
 export class ZwitserlevenFondsenCard extends LitElement {
   private _hass?: HomeAssistant;
   @state() private _config?: ZwitserlevenFondsenCardConfig;
   @state() private _timeRange: TimeRange = "1T";
-
-  /** Cache: "${entityId}:${range}" → { data, fetchedAt } */
-  private _haCache = new Map<string, HaHistoryCacheEntry>();
-  private _fetching = new Set<string>();
 
   /** Cache: symbol → { data, ts } — stored daily prices from the REST endpoint */
   private _dailyHistoryCache = new Map<string, { data: [string, number][]; ts: number }>();
@@ -406,53 +391,6 @@ export class ZwitserlevenFondsenCard extends LitElement {
   }
 
   // -------------------------------------------------------------------------
-  // HA history cache
-  // -------------------------------------------------------------------------
-
-  private _cacheKey(entityId: string, range: TimeRange): string {
-    return `${entityId}:${range}`;
-  }
-
-  private _cachedHaHistory(entityId: string, range: TimeRange): [string, number][] | null {
-    const entry = this._haCache.get(this._cacheKey(entityId, range));
-    if (!entry || Date.now() - entry.fetchedAt > HA_HISTORY_TTL) return null;
-    return entry.data;
-  }
-
-  private async _fetchHaHistory(entityId: string, range: "1T" | "1W"): Promise<void> {
-    const key = this._cacheKey(entityId, range);
-    if (this._fetching.has(key)) return;
-
-    const existing = this._haCache.get(key);
-    if (existing && Date.now() - existing.fetchedAt < HA_HISTORY_TTL) return;
-
-    this._fetching.add(key);
-    try {
-      const start = new Date();
-      if (range === "1T") start.setDate(start.getDate() - 1);
-      else start.setDate(start.getDate() - 7);
-
-      const result = await this._hass!.callApi<[HaHistoryState[]]>(
-        "GET",
-        `history/period/${start.toISOString()}?filter_entity_id=${entityId}` +
-          `&minimal_response=true&no_attributes=true&significant_changes_only=false`
-      );
-
-      const states: HaHistoryState[] = result?.[0] ?? [];
-      const data: [string, number][] = states
-        .map((s) => [s.last_changed, parseFloat(s.state)] as [string, number])
-        .filter(([, p]) => !isNaN(p));
-
-      this._haCache.set(key, { data, fetchedAt: Date.now() });
-      this.requestUpdate();
-    } catch (err) {
-      console.warn(`${LOG_PREFIX} HA history fetch failed for ${entityId}:`, err);
-    } finally {
-      this._fetching.delete(key);
-    }
-  }
-
-  // -------------------------------------------------------------------------
   // Daily price cache (fetched from /api/zwitserleven_fondsen/history)
   // -------------------------------------------------------------------------
 
@@ -485,12 +423,8 @@ export class ZwitserlevenFondsenCard extends LitElement {
   // Chart data helpers
   // -------------------------------------------------------------------------
 
-  private _calcPeriodChange(
-    chartData: [string, number][],
-    range: TimeRange,
-    dailyChangePct: number
-  ): number {
-    if (chartData.length < 2) return range === "1T" ? dailyChangePct : 0;
+  private _calcPeriodChange(chartData: [string, number][]): number {
+    if (chartData.length < 2) return 0;
     const oldest = chartData[0][1];
     const newest = chartData[chartData.length - 1][1];
 
@@ -554,23 +488,17 @@ export class ZwitserlevenFondsenCard extends LitElement {
     const displayName = (raw.attributes["friendly_name"] as string) || attr.long_name || attr.symbol;
     const locale = this._hass?.locale?.language;
     const price = parseFloat(entity.state);
-    // Trigger async fetches (no-op if cached or already in flight)
+    // Fetch the stored daily prices (no-op if cached or already in flight)
     void this._fetchDailyHistory(attr.symbol);
-    if (HA_HISTORY_RANGES.includes(this._timeRange)) {
-      void this._fetchHaHistory(entityId, this._timeRange as "1T" | "1W");
-    }
-    const dailyHistory = this._cachedDailyHistory(attr.symbol) ?? [];
 
     const chartData = buildChartData({
-      haData: HA_HISTORY_RANGES.includes(this._timeRange)
-        ? this._cachedHaHistory(entityId, this._timeRange as "1T" | "1W")
-        : null,
-      dailyHistory,
+      dailyHistory: this._cachedDailyHistory(attr.symbol) ?? [],
       range: this._timeRange,
       livePrice: price,
-      previousClose: attr.previous_close ?? 0,
+      priceDate: attr.price_date,
     });
-    const periodChange = this._calcPeriodChange(chartData, this._timeRange, attr.change_pct ?? 0);
+    const periodChange = this._calcPeriodChange(chartData);
+    const priceDate = formatPriceDate(attr.price_date, locale);
     const isPositive = periodChange >= 0;
     const trendColor = isPositive
       ? "var(--success-color, #4caf50)"
@@ -584,24 +512,24 @@ export class ZwitserlevenFondsenCard extends LitElement {
       <div class="asset-tile" @click=${() => this._openMoreInfo(entityId)}>
         <div class="asset-header">
           <span class="asset-name" title="${displayName}">${displayName}</span>
-          <span class="asset-symbol">${attr.symbol}</span>
+          <span class="asset-meta">
+            <span class="asset-symbol">${attr.symbol}</span>
+            ${priceDate
+              ? html` · <span title=${formatPriceDateLong(attr.price_date, locale)}>${priceDate}</span>`
+              : nothing}
+          </span>
         </div>
         <div class="asset-price">
           <div class="price-stack">
             <span class="price">${formatPrice(price, locale)}</span>
             ${showRef ? html`<span class="ref-price">${formatPrice(refPrice!, locale)}</span>` : nothing}
           </div>
-          <div class="change-stack">
-            <span class="change" style="color:${trendColor}">
-              <span class="arrow">${arrow}</span>${Math.abs(periodChange).toFixed(2)}%
-            </span>
-            <span class="price-date" title=${formatPriceDateLong(attr.price_date, locale)}>
-              ${formatPriceDate(attr.price_date, locale)}
-            </span>
-          </div>
+          <span class="change" style="color:${trendColor}">
+            <span class="arrow">${arrow}</span>${Math.abs(periodChange).toFixed(2)}%
+          </span>
         </div>
         <div class="sparkline-wrap">
-          ${this._renderSparkline(chartData, trendColor, this._timeRange)}
+          ${this._renderSparkline(chartData, trendColor)}
         </div>
       </div>
     `;
@@ -615,10 +543,10 @@ export class ZwitserlevenFondsenCard extends LitElement {
     }));
   }
 
-  private _renderSparkline(history: [string, number][], color: string, range: TimeRange) {
-    if (history.length < 2) return nothing;
+  private _renderSparkline(history: [string, number][], color: string) {
+    if (history.length === 0) return nothing;
 
-    const points = sparklinePoints(history, range)
+    const points = sparklinePoints(history)
       .map(({ x, y }) => `${x.toFixed(1)},${y.toFixed(1)}`)
       .join(" ");
 
@@ -710,11 +638,14 @@ export class ZwitserlevenFondsenCard extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .asset-symbol {
+    .asset-meta {
       font-size: 0.7rem;
       color: var(--secondary-text-color);
-      font-family: monospace;
+      white-space: nowrap;
       flex-shrink: 0;
+    }
+    .asset-symbol {
+      font-family: monospace;
     }
     .asset-price {
       display: flex;
@@ -734,16 +665,6 @@ export class ZwitserlevenFondsenCard extends LitElement {
       white-space: nowrap;
     }
     .ref-price {
-      font-size: 0.7rem;
-      color: var(--secondary-text-color);
-      white-space: nowrap;
-    }
-    .change-stack {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-    }
-    .price-date {
       font-size: 0.7rem;
       color: var(--secondary-text-color);
       white-space: nowrap;

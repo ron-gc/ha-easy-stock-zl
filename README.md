@@ -31,8 +31,8 @@ a separate integration with its own domain (`zwitserleven_fondsen`), card
 - **History recording** — works with the HA recorder out of the box (`SensorStateClass.MEASUREMENT`)
 - **Built-in Lovelace card** — auto-registered, no manual resource setup required
   - Sparkline charts for 5 time ranges: **1D · 1W · 1M · YTD · 1Y**
-  - Short-term (1D/1W) charts use HA recorder data
-  - Long-term charts (1M/YTD/1Y) use the daily prices the integration stores
+  - Charts use the daily prices the integration stores, dated by the day each price is for
+  - **Price date** — the date of the current price, shown after the fund ID
   - **Reference price** — period baseline shown below the current price
   - **Click any tile** to open the HA sensor detail dialog
   - **Tile size** — choose S / M / L in the visual editor to control how many tiles fit per row
@@ -168,16 +168,24 @@ entities:
 
 ### Time ranges
 
-| Value | Meaning | Data source |
+All ranges are drawn from the daily prices the integration stores, each under the date
+Zwitserleven published it for, not the date it was fetched. Ranges count back from the latest
+price date, so the day or two Zwitserleven takes to publish a price doesn't shorten them.
+
+| Value | Meaning | Shows |
 |---|---|---|
-| `1T` | 1 Day | Latest price against the previous one |
-| `1W` | 1 Week | HA recorder |
-| `1M` | 1 Month | Stored daily prices |
-| `YTD` | Year to date | Stored daily prices |
-| `1J` | 1 Year | Stored daily prices |
+| `1T` | 1 Day | The latest price against the one before it |
+| `1W` | 1 Week | The prices of the last 7 days |
+| `1M` | 1 Month | The prices of the last 30 days |
+| `YTD` | Year to date | From the last price of the previous year |
+| `1J` | 1 Year | The prices of the last year |
+
+Each tile also shows the date of its current price after the fund ID, for example
+`LTAAF · 9 okt`.
 
 > **Note:** Zwitserleven only publishes the current price, so the stored history starts on the
-> day you add a fund and the 1M, YTD and 1Y charts fill up over time.
+> day you add a fund and the charts fill up over time. With a single stored price, a chart is a
+> flat line.
 
 ## Troubleshooting
 
