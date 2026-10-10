@@ -4,7 +4,7 @@ All notable changes to this integration are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - Unreleased
+## [0.0.1] - 2026-10-10
 
 First release as a standalone integration. It started from
 [Easy Stock](https://github.com/derspe/ha-easy-stock) 0.5.1 and can be installed next to it.
@@ -22,7 +22,10 @@ First release as a standalone integration. It started from
 - Updates at startup and every day at 20:00 UTC, with one download for all funds. A failed
   update is retried every hour until it succeeds.
 - Lovelace card `custom:zwitserleven-fondsen-card`, registered automatically, with sparkline
-  charts for 1D, 1W, 1M, YTD and 1Y, a visual editor and three tile sizes.
+  charts for 1D, 1W, 1M, YTD and 1Y, a visual editor and three tile sizes. Each tile shows
+  the date of its current price after the fund ID.
+- Charts are drawn from the stored daily prices, each under the date it was published for;
+  ranges count back from the latest price date.
 
 ### Changed from Easy Stock
 
@@ -34,4 +37,4 @@ First release as a standalone integration. It started from
   `price_is_live`, `traded_today`), since funds have one price per day.
 - Requires Home Assistant 2025.1 or newer.
 
-[0.1.0]: https://github.com/ron-gc/ha-zwitserleven-fondsen/releases/tag/v0.1.0
+[0.0.1]: https://github.com/ron-gc/ha-zwitserleven-fondsen/releases/tag/v0.0.1
