@@ -867,6 +867,25 @@ function formatPrice(price, locale) {
     maximumFractionDigits: PRICE_DECIMALS
   }).format(price);
 }
+function parseDay(day) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!match) return null;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+function formatPriceDate(day, locale, now = /* @__PURE__ */ new Date()) {
+  const date = day ? parseDay(day) : null;
+  if (!date) return "";
+  return new Intl.DateTimeFormat(locale, {
+    day: "numeric",
+    month: "short",
+    ...date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }
+  }).format(date);
+}
+function formatPriceDateLong(day, locale) {
+  const date = day ? parseDay(day) : null;
+  if (!date) return "";
+  return new Intl.DateTimeFormat(locale, { dateStyle: "long" }).format(date);
+}
 const SPARKLINE_WIDTH = 200;
 const SPARKLINE_HEIGHT = 48;
 const SPARKLINE_PAD = 2;
@@ -1449,9 +1468,14 @@ const _ZwitserlevenFondsenCard = class _ZwitserlevenFondsenCard extends i {
             <span class="price">${formatPrice(price, locale)}</span>
             ${showRef ? b`<span class="ref-price">${formatPrice(refPrice, locale)}</span>` : A}
           </div>
-          <span class="change" style="color:${trendColor}">
-            <span class="arrow">${arrow}</span>${Math.abs(periodChange).toFixed(2)}%
-          </span>
+          <div class="change-stack">
+            <span class="change" style="color:${trendColor}">
+              <span class="arrow">${arrow}</span>${Math.abs(periodChange).toFixed(2)}%
+            </span>
+            <span class="price-date" title=${formatPriceDateLong(attr.price_date, locale)}>
+              ${formatPriceDate(attr.price_date, locale)}
+            </span>
+          </div>
         </div>
         <div class="sparkline-wrap">
           ${this._renderSparkline(chartData, trendColor, this._timeRange)}
@@ -1581,6 +1605,16 @@ _ZwitserlevenFondsenCard.styles = i$3`
       white-space: nowrap;
     }
     .ref-price {
+      font-size: 0.7rem;
+      color: var(--secondary-text-color);
+      white-space: nowrap;
+    }
+    .change-stack {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+    }
+    .price-date {
       font-size: 0.7rem;
       color: var(--secondary-text-color);
       white-space: nowrap;

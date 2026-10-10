@@ -7,7 +7,7 @@ import type {
   TimeRange,
 } from "./types";
 import { t } from "./translations";
-import { formatPrice } from "./format";
+import { formatPrice, formatPriceDate, formatPriceDateLong } from "./format";
 import { sparklinePoints, SPARKLINE_HEIGHT, SPARKLINE_WIDTH } from "./sparkline";
 import { buildChartData, HA_HISTORY_RANGES } from "./chart-data";
 
@@ -591,9 +591,14 @@ export class ZwitserlevenFondsenCard extends LitElement {
             <span class="price">${formatPrice(price, locale)}</span>
             ${showRef ? html`<span class="ref-price">${formatPrice(refPrice!, locale)}</span>` : nothing}
           </div>
-          <span class="change" style="color:${trendColor}">
-            <span class="arrow">${arrow}</span>${Math.abs(periodChange).toFixed(2)}%
-          </span>
+          <div class="change-stack">
+            <span class="change" style="color:${trendColor}">
+              <span class="arrow">${arrow}</span>${Math.abs(periodChange).toFixed(2)}%
+            </span>
+            <span class="price-date" title=${formatPriceDateLong(attr.price_date, locale)}>
+              ${formatPriceDate(attr.price_date, locale)}
+            </span>
+          </div>
         </div>
         <div class="sparkline-wrap">
           ${this._renderSparkline(chartData, trendColor, this._timeRange)}
@@ -729,6 +734,16 @@ export class ZwitserlevenFondsenCard extends LitElement {
       white-space: nowrap;
     }
     .ref-price {
+      font-size: 0.7rem;
+      color: var(--secondary-text-color);
+      white-space: nowrap;
+    }
+    .change-stack {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+    }
+    .price-date {
       font-size: 0.7rem;
       color: var(--secondary-text-color);
       white-space: nowrap;
